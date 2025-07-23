@@ -30,7 +30,7 @@ A Python application for processing two-column PDF documents. Available in both 
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/pdf-column-processor.git
+git clone https://github.com/svyoma/pdf-column-processor.git
 cd pdf-column-processor
 ```
 
