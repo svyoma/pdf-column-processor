@@ -12,153 +12,116 @@ UPLOAD_FOLDER = 'static/processed'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# --- Utility: Convert PIL image to in-memory PNG bytes ---
-def pil_image_to_bytes(img):
+PROCESS_DPI = 150
+JPEG_QUALITY = 75
+
+def pil_to_jpeg_bytes(img):
     buf = BytesIO()
-    img.save(buf, format="PNG")
+    img.convert("RGB").save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
     buf.seek(0)
     return buf
 
-# --- Auto-detect column split using vertical whitespace ---
-def detect_split_point(image: Image.Image) -> int:
+def detect_split_points(image: Image.Image, num_cols: int) -> list[int]:
     gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
     _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    vertical_sum = np.sum(thresh, axis=0).astype(np.float32)
+    vertical_sum = cv2.GaussianBlur(vertical_sum, (51, 1), 0).flatten()
 
-    vertical_sum = np.sum(thresh, axis=0)
-    vertical_sum = cv2.GaussianBlur(vertical_sum.astype(np.float32), (51, 1), 0)
+    w = len(vertical_sum)
+    points = []
+    for k in range(1, num_cols):
+        expected = int(w * k / num_cols)
+        margin = int(w * 0.08)
+        lo = max(0, expected - margin)
+        hi = min(w, expected + margin)
+        split = int(np.argmin(vertical_sum[lo:hi]) + lo)
+        points.append(split)
+    return sorted(points)
 
-    mid = len(vertical_sum) // 2
-    margin = int(len(vertical_sum) * 0.2)
-    left = max(0, mid - margin)
-    right = min(len(vertical_sum), mid + margin)
-
-    split_col = np.argmin(vertical_sum[left:right]) + left
-    return split_col
-
-# --- Compress PDF ---
 def compress_pdf(input_path, output_path):
     try:
         doc = fitz.open(input_path)
         out = fitz.open()
-
         for page in doc:
-            # Reduce DPI and use JPEG compression for images
-            pix = page.get_pixmap(dpi=120, alpha=False)  # Lower DPI and remove alpha channel
+            pix = page.get_pixmap(dpi=110, alpha=False)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            
-            # Convert to JPEG with compression
             img_buf = BytesIO()
-            img.save(img_buf, format="JPEG", quality=85, optimize=True)
+            img.save(img_buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
             img_buf.seek(0)
-            
-            # Create new page
             temp_page = out.new_page(width=page.rect.width, height=page.rect.height)
             temp_page.insert_image(temp_page.rect, stream=img_buf)
-            
-            # Clean up
             pix = None
             img = None
-            img_buf = None
-
-        # Save with compression
-        out.save(output_path,
-                deflate=True,  # Enable deflate compression
-                garbage=3,     # Enable garbage collection
-                clean=True)    # Clean unused elements
+        out.save(output_path, deflate=True, garbage=3, clean=True)
     finally:
-        # Ensure documents are properly closed
         if 'doc' in locals():
             doc.close()
         if 'out' in locals():
             out.close()
 
-# --- Main processor: Split or Mask mode ---
-def process_pdf(pdf_path, mode='split'):
-    temp_output = os.path.join(UPLOAD_FOLDER, f"temp_{mode}_output.pdf")
+def process_pdf(pdf_path, mode='split', num_cols=2):
     final_output = os.path.join(UPLOAD_FOLDER, f"{mode}_output.pdf")
     doc = None
     out = None
     preview_images = []
 
     try:
-        # Open PDF files
         doc = fitz.open(pdf_path)
         out = fitz.open()
 
         for i, page in enumerate(doc):
-            # Use lower DPI for better performance
-            pix = page.get_pixmap(dpi=200)  # Reduced from 300 to 200 for better performance
+            pix = page.get_pixmap(dpi=PROCESS_DPI)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             w, h = img.size
-            split_col = detect_split_point(img)
+            splits = detect_split_points(img, num_cols)
+            edges = [0] + splits + [w]
 
             if mode == 'split':
-                left = img.crop((0, 0, split_col, h))
-                right = img.crop((split_col, 0, w, h))
-
-                for j, part in enumerate((left, right)):
+                for j in range(num_cols):
+                    part = img.crop((edges[j], 0, edges[j + 1], h))
                     if i == 0:
                         preview_path = os.path.join(UPLOAD_FOLDER, f"preview_{j}.png")
                         part.save(preview_path)
                         preview_images.append(f"/{preview_path}")
-
-                    part_rgb = part.convert("RGB")
                     temp_page = out.new_page(width=part.width, height=part.height)
-                    img_buf = pil_image_to_bytes(part_rgb)
-                    temp_page.insert_image(temp_page.rect, stream=img_buf)
+                    temp_page.insert_image(temp_page.rect, stream=pil_to_jpeg_bytes(part))
 
             elif mode == 'mask':
-                left_masked = img.copy()
-                right_masked = img.copy()
-
-                left_masked.paste((255, 255, 255), box=(split_col, 0, w, h))
-                right_masked.paste((255, 255, 255), box=(0, 0, split_col, h))
-
-                for j, masked in enumerate((left_masked, right_masked)):
+                for j in range(num_cols):
+                    masked = img.copy()
+                    # White out everything except column j
+                    if edges[j] > 0:
+                        masked.paste((255, 255, 255), box=(0, 0, edges[j], h))
+                    if edges[j + 1] < w:
+                        masked.paste((255, 255, 255), box=(edges[j + 1], 0, w, h))
                     if i == 0:
                         preview_path = os.path.join(UPLOAD_FOLDER, f"preview_{j}.png")
                         masked.save(preview_path)
                         preview_images.append(f"/{preview_path}")
-
-                    masked_rgb = masked.convert("RGB")
                     temp_page = out.new_page(width=w, height=h)
-                    img_buf = pil_image_to_bytes(masked_rgb)
-                    temp_page.insert_image(temp_page.rect, stream=img_buf)
+                    temp_page.insert_image(temp_page.rect, stream=pil_to_jpeg_bytes(masked))
 
-            # Clean up page resources
             pix = None
             img = None
 
-        # Save the initial output
-        out.save(temp_output)
-        
-        # Compress the output
-        compress_pdf(temp_output, final_output)
-        
-        # Clean up temporary file
-        try:
-            os.remove(temp_output)
-        except:
-            pass
+        out.save(final_output, deflate=True, garbage=3, clean=True)
 
         return final_output, preview_images
 
     except Exception as e:
         print(f"Error processing PDF: {str(e)}")
         raise
-
     finally:
-        # Clean up and close PDF files
         if doc:
             doc.close()
         if out:
             out.close()
 
-# --- Flask routes ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
         mode = request.form['mode']
+        num_cols = int(request.form.get('num_cols', 2))
         file = request.files['pdf_file']
 
         if file and file.filename.endswith('.pdf'):
@@ -166,9 +129,13 @@ def index():
             path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(path)
 
-            # Process the PDF
-            output_pdf_path, preview_images = process_pdf(path, mode)
-            
+            if mode == 'compress':
+                output_path = os.path.join(UPLOAD_FOLDER, "compressed_output.pdf")
+                compress_pdf(path, output_path)
+                return render_template('index.html',
+                                       download_link='/' + output_path)
+
+            output_pdf_path, preview_images = process_pdf(path, mode, num_cols)
             return render_template('index.html',
                                    preview_images=preview_images,
                                    download_link='/' + output_pdf_path)
