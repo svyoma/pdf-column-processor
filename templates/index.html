@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PDF Column Processor</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f9;
+        }
+        h2 {
+            color: #333;
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin: 5px 0;
+        }
+        select {
+            padding: 5px 10px;
+            font-size: 14px;
+            margin: 5px 0;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        img {
+            max-width: 400px;
+            margin: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        a {
+            color: #007BFF;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .download-options {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+        .download-buttons {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        .download-btn {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #007BFF;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        .download-btn:hover {
+            background-color: #0056b3;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <h2>PDF Column Processor</h2>
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="pdf_file" accept="application/pdf" required><br><br>
+
+        <label><input type="radio" name="mode" value="split" checked> Split Columns</label>
+        <label><input type="radio" name="mode" value="mask"> Mask Columns</label>
+        <label><input type="radio" name="mode" value="compress"> Compress PDF</label>
+        <br>
+
+        <label>Number of Columns:
+            <select name="num_cols">
+                <option value="2" selected>2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+            </select>
+        </label>
+        <br>
+
+        <button type="submit">Process PDF</button>
+    </form>
+
+    {% if preview_images %}
+        <h3>Preview (First Page):</h3>
+        {% for img in preview_images %}
+            <img src="{{ img }}">
+        {% endfor %}
+    {% endif %}
+
+    {% if download_link %}
+        <div class="download-options">
+            <h3>Download Processed PDF:</h3>
+            <div class="download-buttons">
+                <a href="{{ download_link }}" class="download-btn">Download PDF</a>
+            </div>
+        </div>
+    {% endif %}
+</body>
+</html>
