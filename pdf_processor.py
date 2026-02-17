@@ -1,5 +1,4 @@
 import os
-import sys
 import fitz
 import numpy as np
 import cv2
@@ -9,15 +8,34 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from tkinter.messagebox import showinfo, showerror
 
+PROCESS_DPI = 180
+JPEG_QUALITY = 80
+
+def detect_split_points(image, num_cols):
+    gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    vertical_sum = np.sum(thresh, axis=0).astype(np.float32)
+    vertical_sum = cv2.GaussianBlur(vertical_sum, (51, 1), 0).flatten()
+
+    w = len(vertical_sum)
+    points = []
+    for k in range(1, num_cols):
+        expected = int(w * k / num_cols)
+        margin = int(w * 0.08)
+        lo = max(0, expected - margin)
+        hi = min(w, expected + margin)
+        split = int(np.argmin(vertical_sum[lo:hi]) + lo)
+        points.append(split)
+    return sorted(points)
+
 class PDFProcessor:
     def __init__(self):
         self.window = tk.Tk()
         self.window.title("PDF Column Processor")
-        self.window.geometry("600x400")
+        self.window.geometry("600x420")
         self.setup_ui()
 
     def setup_ui(self):
-        # File selection
         frame = ttk.Frame(self.window, padding="10")
         frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
@@ -26,35 +44,25 @@ class PDFProcessor:
         ttk.Entry(frame, textvariable=self.file_path, width=50).grid(row=0, column=1, padx=5)
         ttk.Button(frame, text="Browse", command=self.browse_file).grid(row=0, column=2)
 
-        # Mode selection
         ttk.Label(frame, text="Processing Mode:").grid(row=1, column=0, sticky=tk.W, pady=10)
         self.mode = tk.StringVar(value="split")
         ttk.Radiobutton(frame, text="Split Columns", variable=self.mode, value="split").grid(row=1, column=1, sticky=tk.W)
         ttk.Radiobutton(frame, text="Mask Columns", variable=self.mode, value="mask").grid(row=2, column=1, sticky=tk.W)
 
-        # Process button
-        ttk.Button(frame, text="Process PDF", command=self.process_file).grid(row=3, column=1, pady=20)
+        ttk.Label(frame, text="Number of Columns:").grid(row=3, column=0, sticky=tk.W, pady=10)
+        self.num_cols = tk.IntVar(value=2)
+        col_combo = ttk.Combobox(frame, textvariable=self.num_cols, values=[2, 3, 4, 5], width=5, state="readonly")
+        col_combo.grid(row=3, column=1, sticky=tk.W)
 
-        # Progress bar
+        ttk.Button(frame, text="Process PDF", command=self.process_file).grid(row=4, column=1, pady=20)
+
         self.progress = ttk.Progressbar(frame, length=400, mode='determinate')
-        self.progress.grid(row=4, column=0, columnspan=3, pady=10)
+        self.progress.grid(row=5, column=0, columnspan=3, pady=10)
 
     def browse_file(self):
         filename = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
         if filename:
             self.file_path.set(filename)
-
-    def detect_split_point(self, image):
-        gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
-        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-        vertical_sum = np.sum(thresh, axis=0)
-        vertical_sum = cv2.GaussianBlur(vertical_sum.astype(np.float32), (51, 1), 0)
-        mid = len(vertical_sum) // 2
-        margin = int(len(vertical_sum) * 0.2)
-        left = max(0, mid - margin)
-        right = min(len(vertical_sum), mid + margin)
-        split_col = np.argmin(vertical_sum[left:right]) + left
-        return split_col
 
     def process_file(self):
         if not self.file_path.get():
@@ -65,6 +73,7 @@ class PDFProcessor:
             input_path = self.file_path.get()
             output_dir = os.path.dirname(input_path)
             mode = self.mode.get()
+            num_cols = self.num_cols.get()
             output_path = os.path.join(output_dir, f"processed_{os.path.basename(input_path)}")
 
             doc = fitz.open(input_path)
@@ -72,43 +81,39 @@ class PDFProcessor:
             total_pages = len(doc)
 
             for i, page in enumerate(doc):
-                # Update progress
                 self.progress['value'] = (i + 1) / total_pages * 100
                 self.window.update_idletasks()
 
-                pix = page.get_pixmap(dpi=200)
+                pix = page.get_pixmap(dpi=PROCESS_DPI)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 w, h = img.size
-                split_col = self.detect_split_point(img)
+                splits = detect_split_points(img, num_cols)
+                edges = [0] + splits + [w]
 
                 if mode == "split":
-                    left = img.crop((0, 0, split_col, h))
-                    right = img.crop((split_col, 0, w, h))
-                    for part in (left, right):
-                        part_rgb = part.convert("RGB")
+                    for j in range(num_cols):
+                        part = img.crop((edges[j], 0, edges[j + 1], h))
                         temp_page = out.new_page(width=part.width, height=part.height)
-                        img_buf = BytesIO()
-                        part_rgb.save(img_buf, format="JPEG", quality=85, optimize=True)
-                        img_buf.seek(0)
-                        temp_page.insert_image(temp_page.rect, stream=img_buf)
-                else:  # mask mode
-                    left_masked = img.copy()
-                    right_masked = img.copy()
-                    left_masked.paste((255, 255, 255), box=(split_col, 0, w, h))
-                    right_masked.paste((255, 255, 255), box=(0, 0, split_col, h))
-                    for masked in (left_masked, right_masked):
-                        masked_rgb = masked.convert("RGB")
+                        buf = BytesIO()
+                        part.convert("RGB").save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+                        buf.seek(0)
+                        temp_page.insert_image(temp_page.rect, stream=buf)
+                else:  # mask
+                    for j in range(num_cols):
+                        masked = img.copy()
+                        if edges[j] > 0:
+                            masked.paste((255, 255, 255), box=(0, 0, edges[j], h))
+                        if edges[j + 1] < w:
+                            masked.paste((255, 255, 255), box=(edges[j + 1], 0, w, h))
                         temp_page = out.new_page(width=w, height=h)
-                        img_buf = BytesIO()
-                        masked_rgb.save(img_buf, format="JPEG", quality=85, optimize=True)
-                        img_buf.seek(0)
-                        temp_page.insert_image(temp_page.rect, stream=img_buf)
+                        buf = BytesIO()
+                        masked.convert("RGB").save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+                        buf.seek(0)
+                        temp_page.insert_image(temp_page.rect, stream=buf)
 
-            # Save with compression
-            out.save(output_path,
-                    deflate=True,
-                    garbage=3,
-                    clean=True)
+            out.save(output_path, deflate=True, garbage=3, clean=True)
+            doc.close()
+            out.close()
 
             showinfo("Success", f"PDF processed successfully!\nSaved as: {output_path}")
             self.progress['value'] = 0
